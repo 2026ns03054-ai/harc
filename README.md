@@ -91,13 +91,13 @@ The scripts assume the three VMs from the pilot study:
    cp cluster.env.example cluster.env      # edit if your IPs or user name differ
    bash scripts/experiments.sh check       # about 3 minutes, one short run per policy
    ```
-5. **Run the plan** inside `tmux`, so that it keeps running if your SSH session drops:
+5. **Run the plan** in the background, so that it keeps running after you log out:
    ```bash
-   tmux new -s exp
-   bash scripts/experiments.sh all 2>&1 | tee experiments.log
-   # detach with Ctrl-B then D; reattach later with: tmux attach -t exp
+   nohup bash scripts/experiments.sh all > experiments.log 2>&1 < /dev/null &
+   ls runs/*/*/*/rep*/meta.json | wc -l      # finished runs, 390 in total
+   tail -3 experiments.log                   # what it is doing now
    ```
-   You can also run the parts one at a time (`ref`, `rq2`, `rq3`, `rq5`, `rq1`, `rq4`). `REPS` in `cluster.env` sets the number of repetitions.
+   Finished runs are skipped and an interrupted run is cleaned up and repeated, so after any interruption (a VM restart, for example) just start the same command again. You can also run the parts one at a time (`ref`, `rq2`, `rq3`, `rq5`, `rq1`, `rq4`). `REPS` in `cluster.env` sets the number of repetitions. `DRY=1 bash scripts/experiments.sh all` lists the runs without starting them.
 6. **Analyse:** run `python3 tools/analyze.py runs`. It writes `analysis/summary.md`, `summary.csv`, `runs.csv`, `fig3.png` and `fig4.png`; install `python3-matplotlib` for the figures. Pack everything with `tar czf harc-results.tar.gz runs analysis experiments.log`.
 
 ### What each experiment measures

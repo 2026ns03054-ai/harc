@@ -10,8 +10,11 @@
 #   bash scripts/experiments.sh ref          # failure-free reference runs used by RQ2, RQ3 and RQ5
 #   bash scripts/experiments.sh all          # everything, in the order ref rq2 rq3 rq5 rq1 rq4
 #
-# Settings come from cluster.env (copy cluster.env.example).  Run it on the master VM inside
-# tmux or with nohup, because it takes hours.  Repetitions are the outer loop and policies the
+# Settings come from cluster.env (copy cluster.env.example).  Start it in the background so it
+# keeps running after you log out, and follow it with the log file:
+#   nohup bash scripts/experiments.sh all > experiments.log 2>&1 < /dev/null &
+#   ls runs/*/*/*/rep*/meta.json | wc -l      # finished runs (390 in total)
+# Finished runs are skipped, so after an interruption just start the same command again.  Repetitions are the outer loop and policies the
 # inner loop in a shuffled order, so slow drifts (for example burstable CPU credits) affect
 # every policy alike.  Afterwards: python3 tools/analyze.py runs
 set -e
@@ -33,8 +36,8 @@ RQ1_HOSTS=${RQ1_HOSTS:-"1=local:1 2=local:2"}
 COMMON=(--master-ip "$MASTER_IP" --ssh-user "$SSH_USER" --model "$MODEL" --mean "$MEAN" --down "$DOWN")
 [ -n "$SSH_KEY" ] && COMMON+=(--ssh-key "$SSH_KEY")
 
-run() { python3 tools/run.py "${COMMON[@]}" "$@"; }
-shuffled() { python3 -c "import random,sys; r=random.Random(int(sys.argv[1])); x=sys.argv[2:]; r.shuffle(x); print(' '.join(x))" "$@"; }
+run() { if [ -n "$DRY" ]; then echo "run $*"; else python3 tools/run.py "${COMMON[@]}" "$@"; fi; }
+shuffled() { python3 -c "import random,sys; r=random.Random(sys.argv[1]); x=sys.argv[2:]; r.shuffle(x); print(' '.join(x))" "$@" || exit 1; }
 
 ref() {   # same requests (seeds) as the churn runs, without failures
   for rep in $(seq 1 "$REPS"); do
@@ -80,14 +83,19 @@ rq1() {   # RQ1_HOSTS lists "workers=hosts" pairs, e.g. "1=10.1.1.5:1 2=10.1.1.5
     for rep in $(seq 1 "$REPS"); do
       for spec in $RQ1_HOSTS; do
         n=${spec%%=*}; h=${spec#*=}
-        python3 tools/run.py "${COMMON[@]}" --model "$m" --exp rq1 --config "${tag}_n${n}" --policy harc --no-churn \
+        run --model "$m" --exp rq1 --config "${tag}_n${n}" --policy harc --no-churn \
             --hosts "$h" --n "${RQ1_N:-48}" --mix 256:1 --rep-start "$rep"
       done
     done
   done
 }
 
-rq4() { python3 tools/discovery.py --reps "$REPS" --out runs/rq4/discovery.csv; }
+rq4() {
+  if [ -f runs/rq4/discovery.csv ]; then echo "rq4 already done (runs/rq4/discovery.csv)"; return; fi
+  if [ -n "$DRY" ]; then echo "discovery --reps $REPS"; return; fi
+  mkdir -p runs/rq4 && rm -f runs/rq4/discovery.partial.csv
+  python3 tools/discovery.py --reps "$REPS" --out runs/rq4/discovery.partial.csv && mv runs/rq4/discovery.partial.csv runs/rq4/discovery.csv
+}
 
 check() {
   for pol in restart yd contkv random harc; do

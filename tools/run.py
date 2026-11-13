@@ -16,7 +16,7 @@ examples
       --master-ip 10.1.1.4 --hosts 10.1.1.5:2,10.1.1.6:2 --ssh-key ~/.ssh/dc-key.pem \
       --model models/stories42M.bin --k 0.5 --mean 60 --netem "10mbit 20ms" --bw-mbps 10
 """
-import argparse, json, os, shlex, signal, socket, subprocess, sys, time
+import argparse, json, os, shlex, shutil, signal, socket, subprocess, sys, time
 
 ap = argparse.ArgumentParser()
 ap.add_argument("--exp", required=True)
@@ -51,6 +51,7 @@ ap.add_argument("--ssh-key", default="")
 ap.add_argument("--ssh-user", default="azureuser")
 ap.add_argument("--remote-dir", default="harc", help="repository path on the worker VMs (relative to home)")
 ap.add_argument("--out", default="runs")
+ap.add_argument("--force", action="store_true", help="repeat repetitions that already finished")
 a = ap.parse_args()
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -66,14 +67,35 @@ master_ip = "127.0.0.1" if all(ip == "local" for ip, _ in hosts) else a.master_i
 
 
 def ssh(ip, cmd, **kw):
-    base = ["ssh", "-o", "StrictHostKeyChecking=accept-new", "-o", "BatchMode=yes"]
+    base = ["ssh", "-n", "-o", "StrictHostKeyChecking=accept-new", "-o", "BatchMode=yes",
+            "-o", "ConnectTimeout=15", "-o", "ServerAliveInterval=30"]
     if a.ssh_key:
         base += ["-i", os.path.expanduser(a.ssh_key)]
     return base + ["%s@%s" % (a.ssh_user, ip), cmd]
 
 
-def run_quiet(cmd):
-    return subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+def run_quiet(cmd, timeout=300):
+    try:
+        return subprocess.run(cmd, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                              text=True, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        return subprocess.CompletedProcess(cmd, 1, "timed out: " + " ".join(cmd[-2:]))
+
+
+STALE = "pkill -f '[t]ools/churn.py'; pkill -9 -f '[b]uild/worker'; true"
+
+
+def cleanup(rel):
+    """remove anything an interrupted run left behind: processes on every host and partial logs"""
+    run_quiet(["bash", "-c", "pkill -f '[b]uild/master'; pkill -f '[b]uild/client'; " + STALE +
+               "; sudo -n bash tools/netem.sh off >/dev/null 2>&1; true"])
+    for ip, _ in hosts:
+        if ip != "local":
+            run_quiet(ssh(ip, STALE + "; cd %s && sudo -n bash tools/netem.sh off >/dev/null 2>&1; rm -rf %s; true"
+                          % (a.remote_dir, shlex.quote(rel))))
+    if os.path.isdir(rel):
+        shutil.rmtree(rel)
+    time.sleep(1)
 
 
 def status():
@@ -104,6 +126,10 @@ def netem(on):
 
 for rep in range(a.rep_start, a.rep_start + a.reps):
     rel = os.path.join(a.out, a.exp, a.config, a.policy, "rep%d" % rep)
+    if os.path.exists(os.path.join(rel, "meta.json")) and not a.force:
+        print("--- %s %s rep %d already done, skipped" % (a.config, a.policy, rep), flush=True)
+        continue
+    cleanup(rel)
     os.makedirs(rel, exist_ok=True)
     seed = a.seed * 100 + rep                    # same requests and churn schedule for every policy
     meta = dict(vars(a), rep=rep, run_seed=seed, nworkers=nworkers, concurrency=conc, mu0=mu0,
@@ -114,7 +140,7 @@ for rep in range(a.rep_start, a.rep_start + a.reps):
     mlog = open(os.path.join(rel, "master.log"), "w")
     master = subprocess.Popen(["build/master", str(a.master_port), "--policy", a.policy, "--tau-ms", str(a.tau_ms),
                                "--mu0", str(mu0), "--bw-mbps", str(a.bw_mbps), "--out", rel, "--seed", str(seed)],
-                              stdout=mlog, stderr=subprocess.STDOUT)
+                              stdin=subprocess.DEVNULL, stdout=mlog, stderr=subprocess.STDOUT)
     time.sleep(0.5)
     churners, port = [], 7101
     for hi, (ip, n) in enumerate(hosts):
@@ -129,10 +155,10 @@ for rep in range(a.rep_start, a.rep_start + a.reps):
                 "--seed", str(seed * 10 + hi), "--rng", a.rng, "--hb-ms", str(a.hb_ms), "--logdir", rel,
                 "--tag", "harcrun"] + (["--no-churn"] if a.no_churn else [])
         if ip == "local":
-            churners.append((ip, subprocess.Popen([sys.executable, "tools/churn.py"] + args)))
+            churners.append((ip, subprocess.Popen([sys.executable, "tools/churn.py"] + args, stdin=subprocess.DEVNULL)))
         else:
             cmd = "cd %s && mkdir -p %s && exec python3 tools/churn.py %s" % (a.remote_dir, shlex.quote(rel), " ".join(shlex.quote(x) for x in args))
-            churners.append((ip, subprocess.Popen(ssh(ip, cmd))))
+            churners.append((ip, subprocess.Popen(ssh(ip, cmd), stdin=subprocess.DEVNULL)))
     t0 = time.time()
     while time.time() - t0 < 120:
         st = status()
@@ -149,7 +175,7 @@ for rep in range(a.rep_start, a.rep_start + a.reps):
     clog = open(os.path.join(rel, "client.log"), "w")
     t_client = time.time()
     try:
-        subprocess.run(ccmd, stdout=clog, stderr=subprocess.STDOUT, timeout=a.timeout)
+        subprocess.run(ccmd, stdin=subprocess.DEVNULL, stdout=clog, stderr=subprocess.STDOUT, timeout=a.timeout)
     except subprocess.TimeoutExpired:
         print("warning: client timed out", flush=True)
     meta["client_seconds"] = time.time() - t_client
@@ -158,7 +184,7 @@ for rep in range(a.rep_start, a.rep_start + a.reps):
         if ip == "local":
             p.send_signal(signal.SIGTERM)
         else:
-            run_quiet(ssh(ip, "pkill -TERM -f 'churn.py.*--tag harcrun'"))
+            run_quiet(ssh(ip, "pkill -TERM -f '[c]hurn.py.*--tag harcrun'"))
     for ip, p in churners:
         try:
             p.wait(timeout=20)
@@ -167,13 +193,17 @@ for rep in range(a.rep_start, a.rep_start + a.reps):
     for ip, _ in hosts:
         if ip != "local":
             src = "%s@%s:%s/%s/*" % (a.ssh_user, ip, a.remote_dir, rel)
-            cmd = ["scp", "-q", "-o", "StrictHostKeyChecking=accept-new"] + (["-i", os.path.expanduser(a.ssh_key)] if a.ssh_key else []) + [src, rel + "/"]
+            cmd = ["scp", "-q", "-o", "StrictHostKeyChecking=accept-new", "-o", "BatchMode=yes", "-o", "ConnectTimeout=15"] + \
+                  (["-i", os.path.expanduser(a.ssh_key)] if a.ssh_key else []) + [src, rel + "/"]
             r = run_quiet(cmd)
             if r.returncode:
                 print("warning: could not copy logs from %s: %s" % (ip, r.stdout.strip()), flush=True)
     time.sleep(0.5)
     master.send_signal(signal.SIGTERM)
-    master.wait()
+    try:
+        master.wait(timeout=10)
+    except subprocess.TimeoutExpired:
+        master.kill()
     netem(False)
     meta["finished"] = time.time()
     json.dump(meta, open(os.path.join(rel, "meta.json"), "w"), indent=1)
