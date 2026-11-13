@@ -1,13 +1,15 @@
 # HARC / HyPEC prototype
 #   make            build everything into build/
 #   make test       exactness tests and prefill speed-up (needs models/, see tools/get_models.sh)
+#   default: one binary for any x86-64-v3 CPU (AVX2, FMA), so workers on different CPU
+#   models run identical code; make ARCH=-march=native tunes for this CPU only
 #   make PORTABLE=1 build without CPU-specific instructions and without FMA contraction,
 #                   so that workers on different CPU models compute identical results (RQ5)
 CC      ?= gcc
 ifeq ($(PORTABLE),1)
 ARCH    = -march=x86-64-v2 -ffp-contract=off
 else
-ARCH    = -march=native
+ARCH    = -march=x86-64-v3
 endif
 CFLAGS  ?= -O3 $(ARCH) -Wall -Wno-unknown-pragmas -Wno-unused-function -Wno-format-truncation
 LDLIBS  = -lm -lpthread

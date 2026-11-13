@@ -93,8 +93,8 @@ for meta_path in sorted(glob.glob(os.path.join(a.root, "*", "*", "*", "rep*", "m
     G = {r["cid"]: int(r["G"]) for r in ok}
     run = dict(exp=m["exp"], config=m["config"], policy=m["policy"], rep=m["rep"], dir=d, nworkers=m["nworkers"],
                k=m["k"], mean=m["mean"], bw=m["bw_mbps"], mix=m["mix"], model=os.path.basename(m["model"]),
-               rng=m["rng"], churn=not m["no_churn"], n=len(cl), ok=len(ok), run_seed=m["run_seed"])
-    run["success"] = len(ok) / len(cl) if cl else float("nan")
+               rng=m["rng"], churn=not m["no_churn"], n=m["n"], ok=len(ok), run_seed=m["run_seed"])
+    run["success"] = len(ok) / m["n"]                    # requests that never returned (run timed out) count as failures
     run["lat_mean_s"] = st.mean(lat) if lat else float("nan")
     run["lat_p50_s"] = pct(lat, 0.5); run["lat_p95_s"] = pct(lat, 0.95)
     if cl:
@@ -108,6 +108,7 @@ for meta_path in sorted(glob.glob(os.path.join(a.root, "*", "*", "*", "rep*", "m
     td = st.median(float(x["td"]) for x in reg) / 1000 if reg else float("nan")
     run["td_ms"] = td * 1000; run["tp_ms"] = tp * 1000
     run["worker_failures"] = sum(1 for e in ev if e["event"] == "worker_down")
+    run["rejoins"] = sum(1 for e in ev if e["event"] == "rejoin_request")
     kvb = [int(dict(x.split("=") for x in e["info"].split()).get("kv_bytes", 0)) for e in ev if e["event"] == "done"]
     run["kv_mb_per_req"] = st.mean(kvb) / 1e6 if kvb else float("nan")
     asg = [dict(x.split("=") for x in e["info"].split()) for e in ev if e["event"] == "assign"]
@@ -153,7 +154,7 @@ for r in runs:
     if res: r["exact_resumed"] = sum(r["_hash"][c] == ref["_hash"][c] for c in res) / len(res)
 
 METRICS = ["success", "lat_mean_s", "lat_p50_s", "lat_p95_s", "makespan_s", "tokens_per_s", "failures_per_req",
-           "share_failed", "recomputed_tokens", "reprefill_tokens", "lost_work_s", "kv_mb_per_req", "worker_failures",
+           "share_failed", "recomputed_tokens", "reprefill_tokens", "lost_work_s", "kv_mb_per_req", "worker_failures", "rejoins",
            "td_ms", "tp_ms", "k_hat", "theta_hat", "share_mode_restart", "share_mode_tokens", "share_mode_kv",
            "exact_all", "exact_resumed", "resumed"]
 KEYS = ["exp", "config", "policy", "rep", "nworkers", "k", "mean", "bw", "mix", "model", "rng", "churn", "n", "ok"]

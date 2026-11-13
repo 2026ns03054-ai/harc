@@ -115,7 +115,7 @@ The `ref` runs serve the same requests without failures. RQ2, RQ3 and RQ5 use th
 ## Protocol (one text line per message)
 
 ```
-worker -> master   REGISTER name ip port tp_ms td_ms kv_bytes_per_pos | HB name | BYE name
+worker -> master   REGISTER name ip port tp_ms td_ms kv_bytes_per_pos | HB name (reply OK, or REJOIN after a false suspicion) | BYE name
 master -> worker   TASK rid L seed k_c mode n_prefix kv_pos kv_bytes attempt, PROMPT text, <prefix tokens>, <KV bytes>
 worker -> master   COMMIT rid g n t1..tn | KV rid a b nbytes + bytes | DONE rid G hash tp td commit_ms n_commits + tokens
 client -> master   JOB cid L seed, PROMPT text            -> RESULT cid G hash failures attempts latency_ms queue_ms

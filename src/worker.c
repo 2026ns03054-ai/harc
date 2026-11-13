@@ -33,9 +33,25 @@ static int master_msg(const char *fmt, ...) {
     close(fd); return ok ? 0 : -1;
 }
 
+static int do_register(void) {
+    return master_msg("REGISTER %s %s %d %.4f %.4f %zu", g_name, g_ip, g_port, g_tp_ms, g_td_ms, engine_kv_bytes_per_pos(g_e));
+}
+
+/* heartbeats; if the master declared us down (e.g. heartbeats delayed on a congested link), join again */
 static void *hb_thread(void *a) {
     (void)a;
-    while (!g_stop) { master_msg("HB %s", g_name); usleep(g_hb_ms * 1000); }
+    while (!g_stop) {
+        int fd = connect_to(g_mhost, g_mport, 1000, 3);
+        if (fd >= 0) {
+            char r[LINE_LEN] = "";
+            if (send_line(fd, "HB %s", g_name) == 0 && recv_line(fd, r, sizeof r) > 0 && !strncmp(r, "REJOIN", 6) && !g_stop) {
+                close(fd); fd = -1;
+                if (do_register() == 0) logmsg("declared down by the master; joined again as a new session");
+            }
+            if (fd >= 0) close(fd);
+        }
+        usleep(g_hb_ms * 1000);
+    }
     return NULL;
 }
 
@@ -140,7 +156,7 @@ int main(int argc, char **argv) {
     calibrate();
     logmsg("model loaded; prefill %.3f ms/token (batched), decode %.3f ms/token, rng=%s", g_tp_ms, g_td_ms, g_stateful ? "stateful" : "counter");
     int lfd = listen_on(g_port);
-    while (!g_stop && master_msg("REGISTER %s %s %d %.4f %.4f %zu", g_name, g_ip, g_port, g_tp_ms, g_td_ms, engine_kv_bytes_per_pos(g_e)) < 0) { logmsg("master not reachable, retrying"); sleep(1); }
+    while (!g_stop && do_register() < 0) { logmsg("master not reachable, retrying"); sleep(1); }
     logmsg("registered with master %s:%d", g_mhost, g_mport);
     pthread_t hb; pthread_create(&hb, NULL, hb_thread, NULL); pthread_detach(hb);
 

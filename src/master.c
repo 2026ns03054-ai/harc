@@ -10,7 +10,7 @@
  *                  hazard-adaptive commit interval (Eq. 8), per-request recovery mode (Eqs. 9-11)
  *
  * Messages it accepts (one line each):
- *   REGISTER name ip port tp_ms td_ms [kv_bytes_per_pos] | HB name | BYE name
+ *   REGISTER name ip port tp_ms td_ms [kv_bytes_per_pos] | HB name (-> OK, or REJOIN if it was declared down) | BYE name
  *   JOB cid L seed  + "PROMPT text" line      -> RESULT ... when finished (same connection)
  *   STATUS | LOAD
  *
@@ -251,13 +251,15 @@ static void *scheduler(void *arg) {
         if (ni && np) {
             if (g_policy == P_HARC || g_policy == P_RANDOM || g_policy == P_YD) fit_weibull(now);
             g_now_sort = now;
-            if (g_policy == P_HARC) { qsort(idle, ni, sizeof(int), cmp_worker_hz); qsort(pend, np, sizeof(int), cmp_req_long); }
-            else {
-                qsort(pend, np, sizeof(int), cmp_req_fifo);
-                if (g_policy == P_RANDOM) { for (int i = ni - 1; i > 0; i--) { int j = rand() % (i + 1), t = idle[i]; idle[i] = idle[j]; idle[j] = t; } }
-                else qsort(idle, ni, sizeof(int), cmp_worker_name);
-            }
+            /* queue order decides WHICH requests run now; placement only decides WHERE each one runs */
+            qsort(pend, np, sizeof(int), cmp_req_fifo);
             int n = ni < np ? ni : np;
+            if (g_policy == P_HARC) {                       /* Lemma 1: lowest hazard <-> longest request */
+                qsort(idle, ni, sizeof(int), cmp_worker_hz);
+                qsort(pend, n, sizeof(int), cmp_req_long);
+            } else if (g_policy == P_RANDOM) {
+                for (int i = ni - 1; i > 0; i--) { int j = rand() % (i + 1), t = idle[i]; idle[i] = idle[j]; idle[j] = t; }
+            } else qsort(idle, ni, sizeof(int), cmp_worker_name);
             for (int i = 0; i < n; i++) {
                 int wi = idle[i], ri = pend[i]; req_t *r = R[ri]; double h, q;
                 decide(r, &W[wi], now, &r->mode, &r->kc, &h, &q);
@@ -295,10 +297,15 @@ static void *handle(void *arg) {
         pthread_mutex_unlock(&M);
         send_line(fd, "OK");
     } else if (sscanf(line, "HB %63s", name) == 1) {
+        int rejoin = 0;
         pthread_mutex_lock(&M);
-        for (int i = 0; i < NW; i++) if (!strcmp(W[i].name, name) && W[i].state != W_DOWN) W[i].last_hb = mono_s();
+        for (int i = 0; i < NW; i++)
+            if (!strcmp(W[i].name, name)) {
+                if (W[i].state != W_DOWN) W[i].last_hb = mono_s();
+                else { rejoin = 1; ev("rejoin_request", i, -1, NULL); }   /* falsely suspected: let it come back */
+            }
         pthread_mutex_unlock(&M);
-        send_line(fd, "OK");
+        send_line(fd, rejoin ? "REJOIN" : "OK");
     } else if (sscanf(line, "BYE %63s", name) == 1) {
         pthread_mutex_lock(&M);
         for (int i = 0; i < NW; i++) if (!strcmp(W[i].name, name) && W[i].state != W_DOWN) { W[i].state = W_DOWN; end_session(i, mono_s()); ev("worker_bye", i, -1, NULL); }
